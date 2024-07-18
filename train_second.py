@@ -1,14 +1,12 @@
 # load packages
-import random
 import yaml
 import time
 from munch import Munch
 import numpy as np
 import torch
 from torch import nn
+
 import torch.nn.functional as F
-import torchaudio
-import librosa
 import click
 import shutil
 import traceback
@@ -16,11 +14,12 @@ import warnings
 warnings.simplefilter('ignore')
 from torch.utils.tensorboard import SummaryWriter
 
+from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
 
-from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
 from Utils.PLBERT.util import load_plbert
+
+import os.path as osp
 
 from models import *
 from losses import *
@@ -32,7 +31,6 @@ from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSche
 from optimizers import build_optimizer
 
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
         
 import logging
@@ -52,7 +50,7 @@ def main(config_path):
     rank = dist.get_rank()
     device_id = rank % torch.cuda.device_count()
     device = f'cuda:{rank % torch.cuda.device_count()}'
-    
+
     torch.cuda.set_device(device_id)
 
     config = yaml.safe_load(open(config_path))
@@ -114,7 +112,6 @@ def main(config_path):
                                       device=device,
                                       dataset_config={})
     
-    torch.set_default_device(device)
     # load pretrained ASR model
     ASR_config = config.get('ASR_config', False)
     ASR_path = config.get('ASR_path', False)
@@ -182,7 +179,7 @@ def main(config_path):
     scheduler_params_dict['bert']['max_lr'] = optimizer_params.bert_lr * 2
     scheduler_params_dict['decoder']['max_lr'] = optimizer_params.ft_lr * 2
     scheduler_params_dict['style_encoder']['max_lr'] = optimizer_params.ft_lr * 2
-    model = Munch(**{key: DDP(model[key]) for key in model})
+    model = Munch(**{key: DDP(model[key].to('cuda')) for key in model})
     optimizer = build_optimizer({key: model[key].parameters() for key in model},
                                           scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
     
@@ -259,6 +256,14 @@ def main(config_path):
             waves = batch[0]
             batch = [b for b in batch[1:]]
             texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
+            texts = texts.to('cuda')
+            input_lengths = input_lengths.to('cuda')
+            ref_texts = ref_texts.to('cuda')
+            ref_lengths = ref_lengths.to('cuda')
+            mels = mels.to('cuda')
+            mel_input_length = mel_input_length.to('cuda')
+            ref_mels = ref_mels.to('cuda')
+
 
             with torch.no_grad():
                 mask = length_to_mask(mel_input_length // (2 ** n_down))
@@ -380,8 +385,6 @@ def main(config_path):
             with torch.no_grad():
                 F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1))
                 F0 = F0.reshape(F0.shape[0], F0.shape[1] * 2, F0.shape[2], 1).squeeze()
-
-                asr_real = model.text_aligner.get_feature(gt)
 
                 N_real = log_norm(gt.unsqueeze(1)).squeeze(1)
                 
@@ -669,7 +672,7 @@ def main(config_path):
 
                     iters_test += 1
                 except Exception as e:
-                    print(f"run into exception", e)
+                    print("run into exception", e)
                     traceback.print_exc()
                     continue
 

@@ -1,16 +1,11 @@
 #coding: utf-8
-import os
 import os.path as osp
-import time
 import random
 import numpy as np
-import random
 import soundfile as sf
 import librosa
 
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -255,7 +250,8 @@ def build_dataloader(path_list,
                              pin_memory=(device != 'cpu'),
                              pin_memory_device=device,
                              sampler=sampler,
-                             generator=torch.Generator(device='cuda'))
+                            )
+                            #  generator=torch.Generator(device='cuda'))
 
     return data_loader
 

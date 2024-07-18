@@ -213,7 +213,7 @@ class KDiffusion(Diffusion):
 
     def forward(self, x: Tensor, noise: Tensor = None, **kwargs) -> Tensor:
         batch_size, device = x.shape[0], x.device
-        from einops import rearrange, reduce
+        from einops import rearrange
 
         # Sample amount of noise to add for each batch element
         sigmas = self.sigma_distribution(num_samples=batch_size, device=device)

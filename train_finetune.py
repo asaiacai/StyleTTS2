@@ -7,8 +7,6 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torchaudio
-import librosa
 import click
 import shutil
 import warnings
@@ -17,8 +15,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from meldataset import build_dataloader
 
-from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
 from Utils.PLBERT.util import load_plbert
 
 from models import *

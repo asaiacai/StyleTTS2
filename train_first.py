@@ -1,7 +1,5 @@
 import os
 import os.path as osp
-import re
-import sys
 import yaml
 import shutil
 import numpy as np
@@ -12,14 +10,8 @@ warnings.simplefilter('ignore')
 
 # load packages
 import random
-import yaml
 from munch import Munch
-import numpy as np
-import torch
-from torch import nn
 import torch.nn.functional as F
-import torchaudio
-import librosa
 
 from models import *
 from meldataset import build_dataloader
@@ -29,7 +21,6 @@ from optimizers import build_optimizer
 import time
 
 from accelerate import Accelerator
-from accelerate.utils import LoggerType
 from accelerate import DistributedDataParallelKwargs
 
 from torch.utils.tensorboard import SummaryWriter

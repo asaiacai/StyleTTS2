@@ -31,13 +31,9 @@ from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSche
 
 from optimizers import build_optimizer
 
-# simple fix for dataparallel that allows access to class attributes
-class MyDataParallel(torch.nn.DataParallel):
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
         
 import logging
 from logging import StreamHandler
@@ -51,6 +47,14 @@ logger.addHandler(handler)
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config.yml', type=str)
 def main(config_path):
+
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    device_id = rank % torch.cuda.device_count()
+    device = f'cuda:{rank % torch.cuda.device_count()}'
+    
+    torch.cuda.set_device(device_id)
+
     config = yaml.safe_load(open(config_path))
     
     log_dir = config['log_dir']
@@ -89,14 +93,14 @@ def main(config_path):
     optimizer_params = Munch(config['optimizer_params'])
     
     train_list, val_list = get_data_path_list(train_path, val_path)
-    device = 'cuda'
+
 
     train_dataloader = build_dataloader(train_list,
                                         root_path,
                                         OOD_data=OOD_data,
                                         min_length=min_length,
                                         batch_size=batch_size,
-                                        num_workers=2,
+                                        num_workers=0,
                                         dataset_config={},
                                         device=device)
 
@@ -110,6 +114,7 @@ def main(config_path):
                                       device=device,
                                       dataset_config={})
     
+    torch.set_default_device(device)
     # load pretrained ASR model
     ASR_config = config.get('ASR_config', False)
     ASR_path = config.get('ASR_path', False)
@@ -127,12 +132,7 @@ def main(config_path):
     model_params = recursive_munch(config['model_params'])
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
-    _ = [model[key].to(device) for key in model]
-    
-    # DP
-    for key in model:
-        if key != "mpd" and key != "msd" and key != "wd":
-            model[key] = MyDataParallel(model[key])
+
             
     start_epoch = 0
     iters = 0
@@ -158,16 +158,12 @@ def main(config_path):
         else:
             raise ValueError('You need to specify the path to the first stage model.') 
 
-    gl = GeneratorLoss(model.mpd, model.msd).to(device)
-    dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
+    gl = GeneratorLoss(model.mpd, model.msd)
+    dl = DiscriminatorLoss(model.mpd, model.msd)
     wl = WavLMLoss(model_params.slm.model, 
                    model.wd, 
                    sr, 
-                   model_params.slm.sr).to(device)
-
-    gl = MyDataParallel(gl)
-    dl = MyDataParallel(dl)
-    wl = MyDataParallel(wl)
+                   model_params.slm.sr)
     
     sampler = DiffusionSampler(
         model.diffusion.diffusion,
@@ -186,7 +182,7 @@ def main(config_path):
     scheduler_params_dict['bert']['max_lr'] = optimizer_params.bert_lr * 2
     scheduler_params_dict['decoder']['max_lr'] = optimizer_params.ft_lr * 2
     scheduler_params_dict['style_encoder']['max_lr'] = optimizer_params.ft_lr * 2
-    
+    model = Munch(**{key: DDP(model[key]) for key in model})
     optimizer = build_optimizer({key: model[key].parameters() for key in model},
                                           scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
     
@@ -212,7 +208,8 @@ def main(config_path):
         model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
                                     load_only_params=config.get('load_only_params', True))
         
-    n_down = model.text_aligner.n_down
+    # n_down = model.text_aligner.n_down
+    n_down = model.text_aligner.module.n_down
 
     best_loss = float('inf')  # best test loss
     loss_train_record = list([])
@@ -222,7 +219,7 @@ def main(config_path):
     criterion = nn.L1Loss() # F0 loss (regression)
     torch.cuda.empty_cache()
     
-    stft_loss = MultiResolutionSTFTLoss().to(device)
+    stft_loss = MultiResolutionSTFTLoss()
     
     print('BERT', optimizer.optimizers['bert'])
     print('decoder', optimizer.optimizers['decoder'])
@@ -240,8 +237,9 @@ def main(config_path):
                                 sig=slmadv_params.sig
                                )
 
-
+    
     for epoch in range(start_epoch, epochs):
+        dist.barrier()
         running_loss = 0
         start_time = time.time()
 
@@ -259,13 +257,13 @@ def main(config_path):
 
         for i, batch in enumerate(train_dataloader):
             waves = batch[0]
-            batch = [b.to(device) for b in batch[1:]]
+            batch = [b for b in batch[1:]]
             texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
 
             with torch.no_grad():
-                mask = length_to_mask(mel_input_length // (2 ** n_down)).to(device)
-                mel_mask = length_to_mask(mel_input_length).to(device)
-                text_mask = length_to_mask(input_lengths).to(texts.device)
+                mask = length_to_mask(mel_input_length // (2 ** n_down))
+                mel_mask = length_to_mask(mel_input_length)
+                text_mask = length_to_mask(input_lengths)
 
                 try:
                     _, _, s2s_attn = model.text_aligner(mels, mask, texts)
@@ -318,7 +316,7 @@ def main(config_path):
                     running_std.append(model.diffusion.module.diffusion.sigma_data)
                     
                 if multispeaker:
-                    s_preds = sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(device), 
+                    s_preds = sampler(noise = torch.randn_like(s_trg).unsqueeze(1), 
                           embedding=bert_dur,
                           embedding_scale=1,
                                    features=ref, # reference from the same speaker as the embedding
@@ -327,7 +325,7 @@ def main(config_path):
                     loss_diff = model.diffusion(s_trg.unsqueeze(1), embedding=bert_dur, features=ref).mean() # EDM loss
                     loss_sty = F.l1_loss(s_preds, s_trg.detach()) # style reconstruction loss
                 else:
-                    s_preds = sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(device), 
+                    s_preds = sampler(noise = torch.randn_like(s_trg).unsqueeze(1), 
                           embedding=bert_dur,
                           embedding_scale=1,
                              embedding_mask_proba=0.1,
@@ -360,7 +358,7 @@ def main(config_path):
                 gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
                 
                 y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
-                wav.append(torch.from_numpy(y).to(device))
+                wav.append(torch.from_numpy(y))
 
                 # style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
@@ -573,11 +571,11 @@ def main(config_path):
                 
                 try:
                     waves = batch[0]
-                    batch = [b.to(device) for b in batch[1:]]
+                    batch = [b for b in batch[1:]]
                     texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
                     with torch.no_grad():
-                        mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
-                        text_mask = length_to_mask(input_lengths).to(texts.device)
+                        mask = length_to_mask(mel_input_length // (2 ** n_down))
+                        text_mask = length_to_mask(input_lengths).to(texts)
 
                         _, _, s2s_attn = model.text_aligner(mels, mask, texts)
                         s2s_attn = s2s_attn.transpose(-1, -2)
@@ -631,7 +629,7 @@ def main(config_path):
                         gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
 
                         y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
-                        wav.append(torch.from_numpy(y).to(device))
+                        wav.append(torch.from_numpy(y))
 
                     wav = torch.stack(wav).float().detach()
 
@@ -725,13 +723,13 @@ def main(config_path):
                     
                 for bib in range(len(d_en)):
                     if multispeaker:
-                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device), 
+                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1), 
                               embedding=bert_dur[bib].unsqueeze(0),
                               embedding_scale=1,
                                 features=ref_s[bib].unsqueeze(0), # reference from the same speaker as the embedding
                                  num_steps=5).squeeze(1)
                     else:
-                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device), 
+                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1), 
                               embedding=bert_dur[bib].unsqueeze(0),
                               embedding_scale=1,
                                  num_steps=5).squeeze(1)
@@ -757,9 +755,9 @@ def main(config_path):
                         c_frame += int(pred_dur[i].data)
 
                     # encode prosody
-                    en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device))
+                    en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0))
                     F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
-                    out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device)), 
+                    out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0)), 
                                             F0_pred, N_pred, ref.squeeze().unsqueeze(0))
 
                     writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)

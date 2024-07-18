@@ -13,6 +13,8 @@ from torch import nn
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
 import logging
 logger = logging.getLogger(__name__)
@@ -242,14 +244,18 @@ def build_dataloader(path_list,
                      dataset_config={}):
     
     dataset = FilePathDataset(path_list, root_path, OOD_data=OOD_data, min_length=min_length, validation=validation, **dataset_config)
+    rank, world_size = dist.get_rank(), torch.distributed.get_world_size()
+    sampler = DistributedSampler(dataset, rank=rank, num_replicas=world_size, shuffle=True) if not validation else None
     collate_fn = Collater(**collate_config)
     data_loader = DataLoader(dataset,
                              batch_size=batch_size,
-                             shuffle=(not validation),
                              num_workers=num_workers,
                              drop_last=(not validation),
                              collate_fn=collate_fn,
-                             pin_memory=(device != 'cpu'))
+                             pin_memory=(device != 'cpu'),
+                             pin_memory_device=device,
+                             sampler=sampler,
+                             generator=torch.Generator(device='cuda'))
 
     return data_loader
 

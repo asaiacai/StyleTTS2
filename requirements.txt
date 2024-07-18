@@ -2,6 +2,7 @@ SoundFile
 torchaudio
 munch
 torch
+pandas
 pydub
 pyyaml
 librosa
@@ -11,7 +12,9 @@ accelerate
 transformers
 einops
 einops-exts
+tensorboard
 tqdm
 typing
 typing-extensions
 git+https://github.com/resemble-ai/monotonic_align.git
+git+https://github.com/NVIDIA/TransformerEngine.git@stable

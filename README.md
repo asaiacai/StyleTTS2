@@ -123,3 +123,11 @@ You can import StyleTTS 2 and run it in your own code. However, the inference de
 Code: MIT License
 
 Pre-Trained Models: Before using these pre-trained models, you agree to inform the listeners that the speech samples are synthesized by the pre-trained models, unless you have the permission to use the voice you synthesize. That is, you agree to only use voices whose speakers grant the permission to have their voice cloned, either directly or by license before making synthesized voices public, or you have to publicly announce that these voices are synthesized if you do not have the permission to use these voices.
+
+## Run docker
+
+```
+docker run -it --name aaikawa -v $(pwd):$(pwd) -w $(pwd) --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 nvcr.io/nvidia/pytorch:23.10-py3
+pip install -r requirements.txt
+python train_second.py --config_path ./Configs/config_ft.yml
+```
